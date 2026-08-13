@@ -5,9 +5,13 @@ One machine is an anecdote. The point of this repo is corroboration.
 
 Findings are graded:
 
-- **Confirmed** — reproduced on a clean run, measurement method sound.
-- **Unresolved** — observed, but the measurement could not be isolated.
-- **Ruled out** — suspected, tested, and found to be a non-issue.
+- **Confirmed** — reproduced across independent runs, measurement method sound.
+- **Unresolved** — observed, but could not be isolated cleanly.
+- **Ruled out** — suspected, tested, and found not to hold.
+
+Two runs so far: Run 1 on a warm instance, Run 2 immediately after a gateway
+restart. Anything confirmed twice is a property of the gateway rather than of
+accumulated state.
 
 ---
 
@@ -15,61 +19,85 @@ Findings are graded:
 
 ### F1 — Response-header telemetry is always zero
 
-`x-omniroute-latency-ms`, `-tokens-in`, `-tokens-out` and `-response-cost` read `0`
-in the HTTP response headers. The real values appear only as `: x-omniroute-*=`
-comment lines in the streaming body.
+`x-omniroute-latency-ms`, `-tokens-in`, `-tokens-out` and `-response-cost` read
+`0` in the HTTP response headers. The real values appear only as
+`: x-omniroute-*=` comment lines in the streaming body.
 
-Measured: header `0` ms vs body trailer `292` ms for the same request.
+| Run | Header | Body trailer |
+|---|---|---|
+| 1 | `0` ms | `292` ms |
+| 2 (post-restart) | `0` ms | `283` ms |
 
 Headers must flush before the upstream call completes. Any integration scraping
 headers for observability silently records zeros.
 
-### F2 — Large fixed token overhead per request
+### F2 — Fixed ~4,138-token overhead on every request
 
-A one-word prompt (`ping`, ~1 token) was billed **4,138 input tokens** with
-compression reported as `off; source=off`. A second run measured 4,145 — the same
-magnitude but not byte-identical, suggesting the injected payload contains
-something dynamic rather than a static block.
+A one-word prompt (`ping`, ~1 token) was billed **4,138 input tokens** in both
+runs, with compression reported `off; source=off`. The value was byte-identical
+across a gateway restart, so the injected payload is a fixed preamble rather than
+something that grows with session state.
 
-Roughly 4K tokens are added to every request before it reaches the provider.
-Untested: whether enabling compression reduces this.
+Corroborated independently: 6 client requests in Run 2 produced 25.2K input
+tokens against the served model — ~4,200 per request.
 
-### F3 — Reported latency is ~21x lower than observed latency
+Still untested: whether enabling compression reduces this. The Compression
+analytics page reported zero requests throughout, so compression has never run on
+this instance.
 
-| Measure | Value |
-|---|---|
-| `x-omniroute-latency-ms` (body trailer) | 292 ms |
-| Wall-clock, `curl` `%{time_total}` | 6.18 s |
+### F3 — Reported latency is 16-21x lower than observed latency
 
-Measured on a bare `curl` with no agent framework, so client-side overhead and
-multi-turn tool loops are excluded. Repeat single requests varied widely
-(7.79 s, then 3.25 s), suggesting a warm-up effect on first call.
+| Run | Body-trailer latency | Wall-clock (`curl %{time_total}`) | Ratio |
+|---|---|---|---|
+| 1 | 292 ms | 6.18 s | 21x |
+| 2 | 283 ms | 4.48 s | 16x |
 
-Whatever consumes the remaining ~5.9 s happens inside the gateway, outside the
-window it reports.
+Measured on bare `curl` with no agent framework, so client overhead and
+multi-turn tool loops are excluded.
 
-### F4 — `auto/fast` is roughly 2x faster than `auto/coding`
+The notable part is the asymmetry: the gateway's reported figure is remarkably
+stable (283, 292, 386 ms across every measurement) while wall-clock ranges from
+**4.48 s to 10.84 s** for identical prompts. The reported number is not noisy —
+it appears to time a small internal segment rather than request duration.
 
-Identical prompt, same provider, different channel:
+### F4 — Per-key request counters do not update
 
-| Channel | Model chosen | Wall-clock |
-|---|---|---|
-| `auto/coding` | `claude-haiku-4.5` | 4.67 s |
-| `auto/fast` | `minimax-m2.5` | 2.24 s |
+Two API keys were observed across Run 2:
 
-Actionable for anyone using the gateway interactively.
+| Key | Before | After | Global total |
+|---|---|---|---|
+| `claude` | 111 | 111 | +21 |
+| `code-test` | 11 | 11 | +21 |
+
+Neither per-key row moved while the global request total rose by 21, including
+six requests the author sent directly. This survived a gateway restart.
+
+Per-key usage and cost attribution in *Analytics -> Usage -> API Key Breakdown*
+cannot be relied on. This also blocks any measurement that needs to isolate a
+single request by key.
+
+*(Promoted from "Unresolved" after Run 2.)*
 
 ### F5 — Candidate scoring is counted as requests
 
-`gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra` each gained exactly **+8
-requests with zero tokens** over the same window. Identical counts across three
-independent models indicate enumeration, not failure.
+Zero-token models climb in exact lockstep. Run 2 delta:
 
-`/v1/auto-combo/coding/candidates` returns 22 candidates including exactly these
-models, all `reachable: true`, `breakerState: CLOSED`, `excluded: false`.
+| Model | Δ requests | Δ tokens |
+|---|---|---|
+| `gpt-5.6-luna` | +2 | 0 |
+| `gpt-5.6-sol` | +2 | 0 |
+| `gpt-5.6-terra` | +2 | 0 |
+| `claude-sonnet-5` | +7 | 0 |
+| `north-mini-code-free` | +1 | 0 |
 
-Consequence: "Total Requests" on the dashboard is not comparable to the number of
-client requests made.
+Identical counts across three independent models indicate enumeration, not
+failure. `/v1/auto-combo/coding/candidates` returns 22 candidates including
+exactly these models, all `reachable: true`, `breakerState: CLOSED`,
+`excluded: false`.
+
+In Run 2, **14 of 21 counted requests consumed zero tokens** while only 6 were
+real client calls. "Total Requests" is not comparable to the number of requests a
+client actually made.
 
 ### F6 — Provider diversity collapses to a single backend
 
@@ -83,27 +111,41 @@ choosing this tool for provider diversity should know the steady state.
 
 ## Unresolved
 
-### U1 — Authenticated requests not attributed to their API key
+### U1 — Unattributed high-token request
 
-Two `POST /v1/chat/completions` calls carrying a valid `Authorization: Bearer`
-header returned HTTP 200 and were served. **Neither incremented that key's row in
-Analytics -> Usage -> API Key Breakdown**, which stayed at 11 requests across
-both, while global totals rose over the same window.
-
-Needs confirming on an idle instance. If reproducible, per-key usage and cost
-attribution cannot be relied on.
-
-### U2 — Does one client request produce more than one billed upstream call?
-
-One before/after pair showed `claude-haiku-4.5` gaining +2 requests and +8,200
-input tokens (~2x the 4,138-token payload) for a single `curl`. Not reproduced.
-Attempts to isolate it were blocked by U1. **Treat as unverified.**
+Run 2 recorded `glm-5` gaining **+1 request and +26,000 input tokens** during a
+window in which the author sent six requests, none of which routed to `glm-5`.
+Source unidentified. Recorded only so it is not lost.
 
 ---
 
 ## Ruled out
 
-### R1 — ~167 generated profile directories leaking credentials
+### R1 — `auto/fast` is faster than `auto/coding`
+
+Run 1 suggested a 2x speedup. Run 2 did not reproduce it:
+
+| Run | `auto/coding` | `auto/fast` | Model picked by `auto/fast` |
+|---|---|---|---|
+| 1 | 4.67 s | 2.24 s | `minimax-m2.5` |
+| 2 | 9.01 s | 10.84 s | `claude-haiku-4.5` |
+
+In Run 2 `auto/fast` was **slower** and selected the *same model* as
+`auto/coding`. The Run 1 result reflected which backend happened to be chosen,
+not a property of the channel. **Do not cite the 2x figure.**
+
+### R2 — One client request produces two billed upstream calls
+
+Run 1 showed the served model gaining +2 requests and +8,200 input tokens for a
+single `curl`, suggesting duplicate billing. Run 2 measured this cleanly:
+
+**6 client requests -> exactly 6 billed calls** on `claude-haiku-4.5`, at ~4,200
+input tokens each.
+
+One request in, one billed call out. The Run 1 observation was contamination from
+concurrent Claude Code traffic in the same window. **Retracted.**
+
+### R3 — Generated profile directories leaking credentials
 
 OmniRoute creates a Claude Code profile per catalog model under
 `~/.claude/profiles/` — 167 directories on this machine, in the user's *primary*
@@ -113,32 +155,32 @@ Initial concern was credential duplication. **Only 3 of 167 contained an auth
 token**; the rest hold just `ANTHROPIC_BASE_URL`, a model name and window
 settings. Files are mode 644, which matters only for those 3.
 
-Recorded because the directory count is alarming at first glance and others will
-hit it. Not a finding.
+Recorded because the count is alarming at first glance. Not a finding.
 
 ---
 
 ## Reported privately
 
-One issue is being reported through `SECURITY.md` rather than published here, and
-will be added once the maintainers have had a chance to respond.
+One issue was reported through GitHub's private advisory channel rather than
+published here. It will be added once the maintainers have had a chance to
+respond.
 
 ---
 
 ## Contributing your results
 
 1. Run `./verify-omniroute.sh`
-2. Fill in section 6 by hand if you can isolate the measurement
-3. Copy `report.md` to `results/<os>-<version>-<handle>.md`
-4. Add a row below
-5. Open a PR
+2. Copy `report.md` to `results/<os>-<version>-<handle>.md`
+3. Add a row below
+4. Open a PR
 
 **Check no API key is in your report before pushing.** The script does not write
 one, but verify.
 
-| Reporter | OS | OmniRoute | Provider | F1 headers=0 | F2 tokens for `ping` | F3 reported vs actual | U1 key attribution |
+| Reporter | OS | OmniRoute | Provider | F1 headers=0 | F2 tokens for `ping` | F3 reported vs actual | F4 key counters |
 |---|---|---|---|---|---|---|---|
-| Upshivam786 | Ubuntu 6.8 | 3.8.49 | kiro | yes | 4138 | 292ms vs 6.18s | not attributed |
+| Upshivam786 (run 1) | Ubuntu 6.8 | 3.8.49 | kiro | yes | 4138 | 292ms vs 6.18s | frozen |
+| Upshivam786 (run 2) | Ubuntu 6.8 | 3.8.49 | kiro | yes | 4138 | 283ms vs 4.48s | frozen |
 
 ---
 
@@ -146,7 +188,8 @@ one, but verify.
 
 - **Windows / macOS runs.** Everything so far is Linux.
 - **A different provider mix.** These results are dominated by one backend.
-- **Compression on vs off**, to quantify F2.
-- **An idle-instance measurement** of U1 and U2.
+- **Compression on vs off**, to quantify F2. Never exercised on this instance.
+- **More `auto/*` channel samples.** R1 shows a single comparison proves nothing;
+  the channels need many runs each to say anything about relative latency.
 - **Other agent CLIs.** The config gotchas in the README are Claude Code specific;
   Cursor, Cline and Codex likely have their own.
