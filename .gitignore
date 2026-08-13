@@ -1,0 +1,13 @@
+# Never commit credentials
+settings.json
+*.local.json
+.env
+*.key
+
+# run output; share deliberately with `git add -f`
+report.md
+*.bak.*
+
+# Contributed reports live here; add yours explicitly with `git add -f`
+results/*.md
+!results/.gitkeep

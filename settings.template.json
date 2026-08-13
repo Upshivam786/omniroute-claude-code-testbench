@@ -1,0 +1,9 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:20128",
+    "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_OMNIROUTE_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "auto/coding",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "auto/coding",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "auto/coding"
+  }
+}
