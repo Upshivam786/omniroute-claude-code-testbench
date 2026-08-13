@@ -11,3 +11,9 @@ report.md
 # Contributed reports live here; add yours explicitly with `git add -f`
 results/*.md
 !results/.gitkeep
+*.swp
+*.swo
+SECURITY-REPORT-DRAFT.md
+sec6-revised.md
+FINDINGS.md.new
+apply-updates.sh
