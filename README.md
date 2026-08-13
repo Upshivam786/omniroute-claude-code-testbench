@@ -84,37 +84,47 @@ asks for something like `claude-opus-4-7` and the gateway can't resolve it.
 
 ---
 
-## Open questions this harness is meant to answer
+## Results so far
 
-These came out of one session and need corroboration on other machines before
-any of them is worth filing upstream. If you run this, please open a PR adding
-your `report.md` to `results/` — see [FINDINGS.md](FINDINGS.md).
+Two runs on one machine (Ubuntu 6.8, OmniRoute 3.8.49) — Run 1 warm, Run 2
+immediately after a gateway restart. Full detail and grading in
+**[FINDINGS.md](FINDINGS.md)**.
 
-**Q1 — Are latency/token/cost response headers always zero?**
-On one run the HTTP header read `x-omniroute-latency-ms: 0` while the SSE body
-trailer for the same request read `386`. If headers flush before the upstream
-call completes, every header-scraping integration records zeros.
+**Confirmed across both runs**
 
-**Q2 — How much is injected per request?**
-A 1-token prompt (`ping`) was billed **4,145 input tokens** with compression
-off. Is that tool definitions, a system preamble, or double counting?
+- Response-header telemetry (`x-omniroute-latency-ms`, token and cost headers)
+  always reads `0`; real values appear only in the streaming body.
+- A ~1-token prompt is billed **4,138 input tokens**, byte-identical across a
+  restart — a fixed preamble on every request.
+- Reported latency (~285 ms, very stable) vs observed wall-clock (**4.5-10.8 s**
+  for identical prompts): a 16-21x gap.
+- Zero-token "requests" climb in lockstep across models — candidate scoring
+  counted as requests. In Run 2, **14 of 21** counted requests were never sent by
+  a client.
+- Per-key request counters never update, while the global total does.
 
-**Q3 — Why do request counts exceed prompt counts?**
-A dashboard showed 79 requests for roughly six prompts, with four models at
-exactly 14 requests each and **zero tokens**, while "Fallback Rate" read 0.0%.
-Candidate probing, or retry churn? If it's churn, it would explain a gateway
-reporting 386ms while the user waits 41 seconds.
+**Ruled out after Run 2**
 
-**Q4 — Is unauthenticated local access intended?**
-A request with an empty `Authorization` header was served and consumed quota.
-Plausibly deliberate zero-config behaviour — but worth confirming, especially
-alongside the CORS policy.
+- `auto/fast` being faster than `auto/coding` — Run 2 showed it *slower*, picking
+  the same backend model. The Run 1 result was backend luck, not a channel
+  property.
+- Duplicate billing — 6 client requests produced exactly 6 billed calls.
+- Credential leakage via the ~167 generated `~/.claude/profiles/` directories —
+  only 3 of 167 hold a token.
 
-**Q5 — Does `auto/fast` meaningfully beat `auto/coding`?**
-Section 7 measures it. Enough samples across machines would make this a real
-answer instead of an anecdote.
+Two of six findings did not survive a second run. That is the reason this repo
+exists: **run it twice before you believe it, and on more than one machine.**
 
----
+**Still open**
+
+- Windows and macOS runs.
+- A different provider mix (results here are dominated by one backend).
+- Compression on vs off, to quantify the token overhead.
+- More `auto/*` channel samples — a single comparison proves nothing.
+- Other agent CLIs; the config gotchas above are Claude Code specific.
+
+If you run the harness, please open a PR adding your `report.md` to `results/`
+and a row to the table in FINDINGS.md.
 
 ## Repo layout
 
